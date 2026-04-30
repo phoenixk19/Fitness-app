@@ -1,3 +1,95 @@
+<?php
+// File: C:\xampp\htdocs\appF\dashboard\admin.php
+
+require_once '../includes/config.php';
+require_once '../includes/functions.php';
+require_once '../includes/auth.php';
+require_once '../includes/middleware.php';
+require_once '../includes/roles.php';
+
+// Apply middleware - only admin can access
+applyMiddleware(['authMiddleware', 'noCacheMiddleware'], function() {
+    roleMiddleware(['admin']);
+});
+
+// Get dashboard data
+$db = getDB();
+
+// Get counts
+$totalCoaches = $db->query("SELECT COUNT(*) FROM users WHERE role = 'coach'")->fetch_row()[0] ?? 0;
+$totalClients = $db->query("SELECT COUNT(*) FROM users WHERE role = 'client'")->fetch_row()[0] ?? 0;
+$newLeads = $db->query("SELECT COUNT(*) FROM leads WHERE status = 'new'")->fetch_row()[0] ?? 0;
+$monthlyRevenue = $db->query("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE MONTH(payment_date) = MONTH(NOW()) AND YEAR(payment_date) = YEAR(NOW())")->fetch_row()[0] ?? 0;
+
+// Get recent activity
+$activityResult = $db->query("
+    SELECT al.*, u.name as user_name 
+    FROM activity_logs al 
+    LEFT JOIN users u ON al.user_id = u.id 
+    ORDER BY al.created_at DESC 
+    LIMIT 10
+");
+$recentActivity = $activityResult ? $activityResult->fetch_all(MYSQLI_ASSOC) : [];
+
+// Get recent leads
+$leadsResult = $db->query("
+    SELECT * FROM leads 
+    ORDER BY created_at DESC 
+    LIMIT 5
+");
+$recentLeads = $leadsResult ? $leadsResult->fetch_all(MYSQLI_ASSOC) : [];
+
+// Get monthly revenue data for chart
+$revenueResult = $db->query("
+    SELECT 
+        MONTH(payment_date) as month,
+        SUM(amount) as total
+    FROM payments 
+    WHERE YEAR(payment_date) = YEAR(NOW())
+    GROUP BY MONTH(payment_date)
+    ORDER BY month
+");
+$revenueData = $revenueResult ? $revenueResult->fetch_all(MYSQLI_ASSOC) : [];
+
+// Prepare chart data
+$months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+$revenueValues = array_fill(0, 12, 0);
+
+foreach ($revenueData as $data) {
+    $revenueValues[$data['month'] - 1] = (float)$data['total'];
+}
+
+// Get client distribution
+$distResult = $db->query("
+    SELECT 
+        CASE 
+            WHEN goal = 'weight-loss' THEN 'Weight Loss'
+            WHEN goal = 'muscle-gain' THEN 'Muscle Gain'
+            WHEN goal = 'general-fitness' THEN 'General Fitness'
+            WHEN goal = 'sports-specific' THEN 'Sports'
+            ELSE 'Other'
+        END as program,
+        COUNT(*) as count
+    FROM leads 
+    WHERE converted_to_client_id IS NOT NULL
+    GROUP BY program
+");
+$clientDistribution = $distResult ? $distResult->fetch_all(MYSQLI_ASSOC) : [];
+
+$programLabels = [];
+$programCounts = [];
+
+foreach ($clientDistribution as $dist) {
+    $programLabels[] = $dist['program'];
+    $programCounts[] = (int)$dist['count'];
+}
+
+// If no data, show default
+if (empty($programLabels)) {
+    $programLabels = ['No Data'];
+    $programCounts = [1];
+}
+?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="light">
 <head>
@@ -183,16 +275,31 @@
         .chart-container {
             background: var(--card-bg);
             border-radius: 15px;
-            padding: 20px;
-            margin-bottom: 20px;
+            padding: 25px;
+            margin-bottom: 30px;
             box-shadow: 0 5px 15px rgba(0,0,0,0.05);
             border: 1px solid rgba(0,0,0,0.1);
-            height: 100%;
+            height: 450px;
+            position: relative;
         }
 
         .chart-container h5 {
-            margin-bottom: 1rem;
-            font-size: 1rem;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid rgba(0,0,0,0.1);
+            color: var(--primary-color);
+            font-weight: 600;
+        }
+
+        .chart-wrapper {
+            width: 100%;
+            height: calc(100% - 60px);
+            position: relative;
+        }
+
+        .chart-container canvas {
+            width: 100% !important;
+            height: 100% !important;
         }
 
         /* Tables */
@@ -231,11 +338,6 @@
         .status-pending {
             background: rgba(255, 193, 7, 0.1);
             color: var(--warning-color);
-        }
-
-        .status-inactive {
-            background: rgba(108, 117, 125, 0.1);
-            color: var(--text-light);
         }
 
         /* Quick Actions */
@@ -301,6 +403,10 @@
             .menu-toggle {
                 display: block !important;
             }
+            
+            .chart-container {
+                height: 350px;
+            }
         }
 
         .menu-toggle {
@@ -340,6 +446,7 @@
             padding: 10px 25px;
             border-radius: 10px;
             font-weight: 500;
+            color: white;
         }
 
         .progress {
@@ -362,10 +469,24 @@
             justify-content: center;
         }
 
-        /* Chart specific adjustments */
-        .chart-wrapper {
-            height: 300px;
-            position: relative;
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .user-details {
+            line-height: 1.2;
+        }
+
+        .user-name {
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .user-role {
+            font-size: 0.85rem;
+            color: var(--text-light);
         }
     </style>
 </head>
@@ -386,13 +507,15 @@
             <li>
                 <a href="#">
                     <i class="bi bi-people"></i> Coaches
-                    <span class="badge bg-light text-dark">3</span>
+                    <span class="badge bg-light text-dark"><?php echo $totalCoaches; ?></span>
                 </a>
             </li>
             <li>
                 <a href="#">
                     <i class="bi bi-person-plus"></i> Leads
-                    <span class="badge bg-danger notification-badge">5</span>
+                    <?php if ($newLeads > 0): ?>
+                        <span class="badge bg-danger notification-badge"><?php echo $newLeads; ?></span>
+                    <?php endif; ?>
                 </a>
             </li>
             <li>
@@ -426,12 +549,12 @@
                 </a>
             </li>
             <li class="mt-4">
-                <a href="index.php">
+                <a href="/appF/index.php">
                     <i class="bi bi-globe"></i> Public Website
                 </a>
             </li>
             <li>
-                <a href="login.php">
+                <a href="/appF/logout.php">
                     <i class="bi bi-box-arrow-right"></i> Logout
                 </a>
             </li>
@@ -439,10 +562,10 @@
         
         <div class="sidebar-footer mt-auto p-3">
             <div class="d-flex align-items-center">
-                <div class="user-avatar">AJ</div>
+                <div class="user-avatar"><?php echo strtoupper(substr($_SESSION['user_name'], 0, 2)); ?></div>
                 <div class="ms-2">
-                    <div class="small fw-bold">Admin Johnson</div>
-                    <div class="x-small opacity-75">Head Coach</div>
+                    <div class="small fw-bold"><?php echo htmlspecialchars($_SESSION['user_name']); ?></div>
+                    <div class="x-small opacity-75">Administrator</div>
                 </div>
             </div>
         </div>
@@ -461,22 +584,12 @@
             </div>
             
             <div class="user-profile">
-                <div class="dropdown">
-                    <button class="btn btn-link text-decoration-none dropdown-toggle" type="button" data-bs-toggle="dropdown">
-                        <div class="d-flex align-items-center">
-                            <div class="user-avatar me-2">AJ</div>
-                            <div>
-                                <div class="small fw-bold">Admin Johnson</div>
-                                <div class="x-small text-muted">Head Coach</div>
-                            </div>
-                        </div>
-                    </button>
-                    <ul class="dropdown-menu">
-                        <li><a class="dropdown-item" href="#"><i class="bi bi-person me-2"></i> Profile</a></li>
-                        <li><a class="dropdown-item" href="#"><i class="bi bi-gear me-2"></i> Settings</a></li>
-                        <li><hr class="dropdown-divider"></li>
-                        <li><a class="dropdown-item" href="login.php"><i class="bi bi-box-arrow-right me-2"></i> Logout</a></li>
-                    </ul>
+                <div class="user-info">
+                    <div class="user-details">
+                        <div class="user-name"><?php echo htmlspecialchars($_SESSION['user_name']); ?></div>
+                        <div class="user-role">Administrator</div>
+                    </div>
+                    <div class="user-avatar"><?php echo strtoupper(substr($_SESSION['user_name'], 0, 2)); ?></div>
                 </div>
             </div>
         </div>
@@ -490,11 +603,11 @@
 
         <!-- Quick Actions -->
         <div class="quick-actions">
-            <a href="#" class="action-btn">
+            <a href="#" class="action-btn" data-bs-toggle="modal" data-bs-target="#addCoachModal">
                 <i class="bi bi-plus-circle fs-3"></i>
                 <span>Add New Coach</span>
             </a>
-            <a href="#" class="action-btn">
+            <a href="#" class="action-btn" data-bs-toggle="modal" data-bs-target="#editWebsiteModal">
                 <i class="bi bi-pencil-square fs-3"></i>
                 <span>Edit Website</span>
             </a>
@@ -515,10 +628,10 @@
                     <div class="stat-icon" style="background: rgba(74, 111, 165, 0.1); color: var(--primary-color);">
                         <i class="bi bi-people"></i>
                     </div>
-                    <div class="stat-number">47</div>
+                    <div class="stat-number"><?php echo $totalClients; ?></div>
                     <div class="stat-label">Total Clients</div>
                     <div class="small mt-2 text-success">
-                        <i class="bi bi-arrow-up"></i> 12% from last month
+                        <i class="bi bi-arrow-up"></i> Active clients
                     </div>
                 </div>
             </div>
@@ -528,10 +641,10 @@
                     <div class="stat-icon" style="background: rgba(40, 167, 69, 0.1); color: var(--success-color);">
                         <i class="bi bi-person-check"></i>
                     </div>
-                    <div class="stat-number">3</div>
+                    <div class="stat-number"><?php echo $totalCoaches; ?></div>
                     <div class="stat-label">Active Coaches</div>
                     <div class="small mt-2 text-muted">
-                        2 assistants available
+                        Managing clients
                     </div>
                 </div>
             </div>
@@ -541,7 +654,7 @@
                     <div class="stat-icon" style="background: rgba(255, 193, 7, 0.1); color: var(--warning-color);">
                         <i class="bi bi-envelope"></i>
                     </div>
-                    <div class="stat-number">5</div>
+                    <div class="stat-number"><?php echo $newLeads; ?></div>
                     <div class="stat-label">New Leads</div>
                     <div class="small mt-2 text-warning">
                         Need follow-up
@@ -554,16 +667,16 @@
                     <div class="stat-icon" style="background: rgba(220, 53, 69, 0.1); color: var(--danger-color);">
                         <i class="bi bi-currency-dollar"></i>
                     </div>
-                    <div class="stat-number">$8,450</div>
+                    <div class="stat-number">$<?php echo number_format($monthlyRevenue); ?></div>
                     <div class="stat-label">Monthly Revenue</div>
                     <div class="small mt-2 text-success">
-                        <i class="bi bi-arrow-up"></i> 18% growth
+                        <i class="bi bi-arrow-up"></i> This month
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Charts Row - FIXED VERSION -->
+        <!-- Charts Row -->
         <div class="row">
             <div class="col-lg-8">
                 <div class="chart-container">
@@ -595,63 +708,34 @@
                     <div class="table-responsive">
                         <table class="table table-hover">
                             <thead>
-                                <tr>
-                                    <th>Coach</th>
+                                <table>
+                                    <th>User</th>
                                     <th>Action</th>
-                                    <th>Client</th>
+                                    <th>Details</th>
                                     <th>Time</th>
-                                    <th>Status</th>
                                 </tr>
                             </thead>
                             <tbody>
+                                <?php foreach ($recentActivity as $activity): ?>
                                 <tr>
                                     <td>
                                         <div class="d-flex align-items-center">
-                                            <div class="user-avatar me-2" style="width: 30px; height: 30px; font-size: 0.8rem;">SC</div>
-                                            <span>Sarah Chen</span>
+                                            <div class="user-avatar me-2" style="width: 30px; height: 30px; font-size: 0.8rem;">
+                                                <?php echo $activity['user_name'] ? strtoupper(substr($activity['user_name'], 0, 2)) : '?'; ?>
+                                            </div>
+                                            <span><?php echo htmlspecialchars($activity['user_name'] ?? 'System'); ?></span>
                                         </div>
                                     </td>
-                                    <td>Assigned New Workout</td>
-                                    <td>Michael Wong</td>
-                                    <td>2 hours ago</td>
-                                    <td><span class="status-badge status-active">Completed</span></td>
+                                    <td><?php echo htmlspecialchars($activity['action']); ?></td>
+                                    <td><?php echo htmlspecialchars(substr($activity['details'] ?? '', 0, 30)); ?></td>
+                                    <td><?php echo formatDate($activity['created_at']); ?></td>
                                 </tr>
+                                <?php endforeach; ?>
+                                <?php if (empty($recentActivity)): ?>
                                 <tr>
-                                    <td>
-                                        <div class="d-flex align-items-center">
-                                            <div class="user-avatar me-2" style="width: 30px; height: 30px; font-size: 0.8rem;">MJ</div>
-                                            <span>Mike Johnson</span>
-                                        </div>
-                                    </td>
-                                    <td>Updated Nutrition Plan</td>
-                                    <td>Emma Davis</td>
-                                    <td>4 hours ago</td>
-                                    <td><span class="status-badge status-active">Completed</span></td>
+                                    <td colspan="4" class="text-center text-muted">No recent activity</td>
                                 </tr>
-                                <tr>
-                                    <td>
-                                        <div class="d-flex align-items-center">
-                                            <div class="user-avatar me-2" style="width: 30px; height: 30px; font-size: 0.8rem;">LR</div>
-                                            <span>Lisa Rodriguez</span>
-                                        </div>
-                                    </td>
-                                    <td>Processed Payment</td>
-                                    <td>David Wilson</td>
-                                    <td>1 day ago</td>
-                                    <td><span class="status-badge status-pending">Pending</span></td>
-                                </tr>
-                                <tr>
-                                    <td>
-                                        <div class="d-flex align-items-center">
-                                            <div class="user-avatar me-2" style="width: 30px; height: 30px; font-size: 0.8rem;">SC</div>
-                                            <span>Sarah Chen</span>
-                                        </div>
-                                    </td>
-                                    <td>Added Progress Photo</td>
-                                    <td>James Miller</td>
-                                    <td>2 days ago</td>
-                                    <td><span class="status-badge status-active">Completed</span></td>
-                                </tr>
+                                <?php endif; ?>
                             </tbody>
                         </table>
                     </div>
@@ -662,61 +746,27 @@
                 <div class="data-table">
                     <div class="d-flex justify-content-between align-items-center mb-3">
                         <h5>New Leads</h5>
-                        <a href="#" class="btn btn-sm btn-primary">Contact All</a>
+                        <a href="#" class="btn btn-sm btn-primary">View All</a>
                     </div>
                     
                     <div class="list-group">
+                        <?php foreach ($recentLeads as $lead): ?>
                         <div class="list-group-item border-0 mb-2" style="background: rgba(255, 193, 7, 0.05); border-radius: 10px;">
                             <div class="d-flex justify-content-between align-items-start">
                                 <div>
-                                    <h6 class="mb-1">Robert Garcia</h6>
-                                    <p class="mb-1 small text-muted">Weight Loss Program</p>
-                                    <span class="badge bg-warning">New</span>
+                                    <h6 class="mb-1"><?php echo htmlspecialchars($lead['first_name'] . ' ' . $lead['last_name']); ?></h6>
+                                    <p class="mb-1 small text-muted"><?php echo htmlspecialchars($lead['fitness_goal'] ?? 'No goal specified'); ?></p>
+                                    <span class="badge bg-warning"><?php echo ucfirst($lead['status']); ?></span>
                                 </div>
-                                <button class="btn btn-sm btn-outline-primary">
+                                <button class="btn btn-sm btn-outline-primary" onclick="alert('Contact lead: <?php echo htmlspecialchars($lead['email']); ?>')">
                                     <i class="bi bi-telephone"></i>
                                 </button>
                             </div>
                         </div>
-                        
-                        <div class="list-group-item border-0 mb-2" style="background: rgba(255, 193, 7, 0.05); border-radius: 10px;">
-                            <div class="d-flex justify-content-between align-items-start">
-                                <div>
-                                    <h6 class="mb-1">Jennifer Lee</h6>
-                                    <p class="mb-1 small text-muted">Muscle Gain Program</p>
-                                    <span class="badge bg-warning">New</span>
-                                </div>
-                                <button class="btn btn-sm btn-outline-primary">
-                                    <i class="bi bi-envelope"></i>
-                                </button>
-                            </div>
-                        </div>
-                        
-                        <div class="list-group-item border-0 mb-2" style="background: rgba(108, 117, 125, 0.05); border-radius: 10px;">
-                            <div class="d-flex justify-content-between align-items-start">
-                                <div>
-                                    <h6 class="mb-1">Thomas Brown</h6>
-                                    <p class="mb-1 small text-muted">Already Contacted</p>
-                                    <span class="badge bg-secondary">Contacted</span>
-                                </div>
-                                <button class="btn btn-sm btn-outline-secondary">
-                                    <i class="bi bi-check"></i>
-                                </button>
-                            </div>
-                        </div>
-                        
-                        <div class="list-group-item border-0" style="background: rgba(40, 167, 69, 0.05); border-radius: 10px;">
-                            <div class="d-flex justify-content-between align-items-start">
-                                <div>
-                                    <h6 class="mb-1">Maria Gonzalez</h6>
-                                    <p class="mb-1 small text-muted">Converted to Client</p>
-                                    <span class="badge bg-success">Converted</span>
-                                </div>
-                                <button class="btn btn-sm btn-outline-success">
-                                    <i class="bi bi-person-check"></i>
-                                </button>
-                            </div>
-                        </div>
+                        <?php endforeach; ?>
+                        <?php if (empty($recentLeads)): ?>
+                        <p class="text-center text-muted">No new leads</p>
+                        <?php endif; ?>
                     </div>
                 </div>
             </div>
@@ -766,6 +816,72 @@
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Coach Modal -->
+    <div class="modal fade" id="addCoachModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Add New Coach</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form action="../api/coaches.php" method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label class="form-label">Name</label>
+                            <input type="text" name="name" class="form-control" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Email</label>
+                            <input type="email" name="email" class="form-control" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Password</label>
+                            <input type="password" name="password" class="form-control" required>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Add Coach</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Website Modal -->
+    <div class="modal fade" id="editWebsiteModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Edit Website Settings</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form action="../api/settings.php" method="POST" enctype="multipart/form-data">
+                    <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label class="form-label">Site Name</label>
+                            <input type="text" name="site_name" class="form-control" value="FitCoach Pro">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Primary Color</label>
+                            <input type="color" name="primary_color" class="form-control form-control-color" value="#4A6FA5">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Logo</label>
+                            <input type="file" name="logo" class="form-control" accept="image/*">
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
@@ -826,19 +942,20 @@
         const revenueChart = new Chart(revenueCtx, {
             type: 'line',
             data: {
-                labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul'],
+                labels: <?php echo json_encode($months); ?>,
                 datasets: [{
                     label: 'Revenue ($)',
-                    data: [6500, 7200, 8000, 7800, 8200, 8450, 9000],
+                    data: <?php echo json_encode($revenueValues); ?>,
                     borderColor: 'rgba(74, 111, 165, 1)',
                     backgroundColor: 'rgba(74, 111, 165, 0.1)',
-                    borderWidth: 2,
+                    borderWidth: 4,
                     fill: true,
-                    tension: 0.3,
+                    tension: 0.4,
                     pointBackgroundColor: 'rgba(74, 111, 165, 1)',
                     pointBorderColor: '#fff',
                     pointBorderWidth: 2,
-                    pointRadius: 4
+                    pointRadius: 6,
+                    pointHoverRadius: 10
                 }]
             },
             options: {
@@ -846,32 +963,29 @@
                 maintainAspectRatio: false,
                 plugins: {
                     legend: {
-                        display: false
+                        display: true,
+                        position: 'top',
+                        labels: {
+                            font: {
+                                size: 14
+                            },
+                            padding: 20
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return `Revenue: $${context.raw.toLocaleString()}`;
+                            }
+                        }
                     }
                 },
                 scales: {
                     y: {
-                        beginAtZero: false,
-                        min: 6000,
-                        grid: {
-                            color: 'rgba(0,0,0,0.05)'
-                        },
+                        beginAtZero: true,
                         ticks: {
                             callback: function(value) {
                                 return '$' + value.toLocaleString();
-                            },
-                            font: {
-                                size: 11
-                            }
-                        }
-                    },
-                    x: {
-                        grid: {
-                            color: 'rgba(0,0,0,0.05)'
-                        },
-                        ticks: {
-                            font: {
-                                size: 11
                             }
                         }
                     }
@@ -884,17 +998,19 @@
         const clientChart = new Chart(clientCtx, {
             type: 'doughnut',
             data: {
-                labels: ['Weight Loss', 'Muscle Gain', 'General Fitness', 'Sports'],
+                labels: <?php echo json_encode($programLabels); ?>,
                 datasets: [{
-                    data: [35, 25, 20, 20],
+                    data: <?php echo json_encode($programCounts); ?>,
                     backgroundColor: [
-                        'rgba(74, 111, 165, 0.8)',
-                        'rgba(40, 167, 69, 0.8)',
-                        'rgba(255, 193, 7, 0.8)',
-                        'rgba(220, 53, 69, 0.8)'
+                        'rgba(74, 111, 165, 0.9)',
+                        'rgba(40, 167, 69, 0.9)',
+                        'rgba(255, 193, 7, 0.9)',
+                        'rgba(220, 53, 69, 0.9)',
+                        'rgba(108, 117, 125, 0.9)'
                     ],
-                    borderWidth: 1,
-                    borderColor: 'var(--card-bg)'
+                    borderWidth: 3,
+                    borderColor: 'var(--card-bg)',
+                    hoverOffset: 20
                 }]
             },
             options: {
@@ -902,19 +1018,24 @@
                 maintainAspectRatio: false,
                 plugins: {
                     legend: {
-                        position: 'bottom',
+                        position: 'right',
                         labels: {
+                            font: {
+                                size: 13
+                            },
                             padding: 15,
                             usePointStyle: true,
-                            font: {
-                                size: 11
-                            }
+                            pointStyle: 'circle'
                         }
                     },
                     tooltip: {
                         callbacks: {
                             label: function(context) {
-                                return context.label + ': ' + context.parsed + '%';
+                                const label = context.label || '';
+                                const value = context.raw || 0;
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const percentage = Math.round((value / total) * 100);
+                                return `${label}: ${value} clients (${percentage}%)`;
                             }
                         }
                     }
@@ -923,38 +1044,12 @@
             }
         });
 
-        // Auto-refresh notifications (simulated)
-        function updateNotifications() {
-            const notificationBadge = document.querySelector('.notification-badge');
-            const currentCount = parseInt(notificationBadge.textContent);
-            
-            // Simulate new notifications (random between 0-2)
-            const newNotifications = Math.floor(Math.random() * 3);
-            if (newNotifications > 0) {
-                notificationBadge.textContent = currentCount + newNotifications;
-                notificationBadge.style.animation = 'none';
-                setTimeout(() => {
-                    notificationBadge.style.animation = 'pulse 0.5s';
-                }, 10);
-            }
+        function resizeCharts() {
+            revenueChart.resize();
+            clientChart.resize();
         }
 
-        // Update notifications every 30 seconds
-        setInterval(updateNotifications, 30000);
-
-        // Add pulse animation for notifications
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes pulse {
-                0% { transform: scale(1); }
-                50% { transform: scale(1.2); }
-                100% { transform: scale(1); }
-            }
-            .notification-badge {
-                animation: pulse 0.5s;
-            }
-        `;
-        document.head.appendChild(style);
+        window.addEventListener('resize', resizeCharts);
     </script>
 </body>
 </html>

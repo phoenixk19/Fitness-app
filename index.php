@@ -197,6 +197,8 @@
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" href="#features">Features</a>
+
+                        
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" href="#about">About</a>
@@ -205,7 +207,7 @@
                         <a class="nav-link" href="#contact">Contact</a>
                     </li>
                     <li class="nav-item ms-2">
-                        <a class="btn login-btn" href="#">Login/Register</a>
+                        <a class="btn login-btn" href="appf/signup.php">Login/Register</a>
                     </li>
                 </ul>
             </div>

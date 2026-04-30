@@ -1,3 +1,104 @@
+<?php
+// File: C:\xampp\htdocs\appF\dashboard\editor.php
+
+require_once '../includes/config.php';
+require_once '../includes/functions.php';
+require_once '../includes/auth.php';
+require_once '../includes/middleware.php';
+require_once '../includes/roles.php';
+
+// Apply middleware - only editor can access
+applyMiddleware(['authMiddleware', 'noCacheMiddleware'], function() {
+    roleMiddleware(['editor']);
+});
+
+$userId = $_SESSION['user_id'];
+$db = getDB();
+
+// Get editor's assigned clients
+$assignedClients = $db->prepare("
+    SELECT u.id, u.name, u.email, 
+           (SELECT COUNT(*) FROM client_workouts WHERE client_id = u.id AND status = 'completed') as workouts_completed,
+           (SELECT COUNT(*) FROM meal_logs WHERE client_id = u.id AND meal_date = CURDATE()) as meals_today,
+           (SELECT MAX(start_date) FROM client_workouts WHERE client_id = u.id) as last_workout
+    FROM users u
+    JOIN editor_assignments ea ON u.id = ea.client_id
+    WHERE ea.editor_id = ?
+    ORDER BY u.name
+");
+$assignedClients->bind_param("i", $userId);
+$assignedClients->execute();
+$clientsResult = $assignedClients->get_result();
+$clients = $clientsResult ? $clientsResult->fetch_all(MYSQLI_ASSOC) : [];
+
+// Get total counts
+$totalClients = count($clients);
+
+$workoutsLogged = $db->prepare("
+    SELECT COUNT(*) FROM client_workout_exercises cwe
+    JOIN client_workouts cw ON cwe.client_workout_id = cw.id
+    WHERE cw.client_id IN (SELECT client_id FROM editor_assignments WHERE editor_id = ?)
+    AND cwe.logged_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+");
+$workoutsLogged->bind_param("i", $userId);
+$workoutsLogged->execute();
+$workoutsResult = $workoutsLogged->get_result();
+$workoutsCount = $workoutsResult ? ($workoutsResult->fetch_row()[0] ?? 0) : 0;
+
+$mealsTracked = $db->prepare("
+    SELECT COUNT(*) FROM meal_logs
+    WHERE client_id IN (SELECT client_id FROM editor_assignments WHERE editor_id = ?)
+    AND logged_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+");
+$mealsTracked->bind_param("i", $userId);
+$mealsTracked->execute();
+$mealsResult = $mealsTracked->get_result();
+$mealsCount = $mealsResult ? ($mealsResult->fetch_row()[0] ?? 0) : 0;
+
+$commentsAdded = $db->prepare("
+    SELECT COUNT(*) FROM activity_logs
+    WHERE user_id = ? AND action = 'add_comment'
+");
+$commentsAdded->bind_param("i", $userId);
+$commentsAdded->execute();
+$commentsResult = $commentsAdded->get_result();
+$commentsCount = $commentsResult ? ($commentsResult->fetch_row()[0] ?? 0) : 0;
+
+// Get today's pending workouts for assigned clients
+$pendingWorkouts = $db->prepare("
+    SELECT cw.*, u.name as client_name, wt.name as workout_name
+    FROM client_workouts cw
+    JOIN users u ON cw.client_id = u.id
+    LEFT JOIN workout_templates wt ON cw.template_id = wt.id
+    WHERE cw.client_id IN (SELECT client_id FROM editor_assignments WHERE editor_id = ?)
+    AND cw.start_date <= CURDATE()
+    AND cw.status IN ('scheduled', 'in_progress')
+    ORDER BY cw.start_date
+    LIMIT 3
+");
+$pendingWorkouts->bind_param("i", $userId);
+$pendingWorkouts->execute();
+$pendingResult = $pendingWorkouts->get_result();
+$pendingWorkouts = $pendingResult ? $pendingResult->fetch_all(MYSQLI_ASSOC) : [];
+
+// Get recent comments
+$recentComments = $db->prepare("
+    SELECT al.*, u.name as user_name
+    FROM activity_logs al
+    LEFT JOIN users u ON al.user_id = u.id
+    WHERE (al.user_id IN (SELECT client_id FROM editor_assignments WHERE editor_id = ?) OR al.user_id = ?)
+    AND al.action = 'add_comment'
+    ORDER BY al.created_at DESC
+    LIMIT 5
+");
+$recentComments->bind_param("ii", $userId, $userId);
+$recentComments->execute();
+$commentsResult = $recentComments->get_result();
+$recentComments = $commentsResult ? $commentsResult->fetch_all(MYSQLI_ASSOC) : [];
+
+// Get current client for forms (default to first client)
+$currentClientId = isset($_GET['client']) ? (int)$_GET['client'] : ($clients[0]['id'] ?? 0);
+?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="light">
 <head>
@@ -11,6 +112,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     
     <style>
+        /* Keep all your existing CSS styles - they're fine */
         :root {
             --primary-color: #4A6FA5;
             --secondary-color: #166088;
@@ -44,7 +146,6 @@
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
 
-        /* Top Navigation */
         .editor-nav {
             background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
             color: white;
@@ -62,6 +163,8 @@
             max-width: 1200px;
             margin: 0 auto;
             padding: 0 20px;
+            flex-wrap: wrap;
+            gap: 15px;
         }
 
         .editor-info {
@@ -96,9 +199,9 @@
             display: flex;
             gap: 10px;
             align-items: center;
+            flex-wrap: wrap;
         }
 
-        /* Main Content */
         .editor-container {
             max-width: 1200px;
             margin: 0 auto;
@@ -114,7 +217,6 @@
             box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         }
 
-        /* Stats Cards */
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -165,7 +267,24 @@
             font-size: 0.9rem;
         }
 
-        /* Tabs Navigation */
+        .client-selector {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 15px 20px;
+            margin-bottom: 25px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+            border: 1px solid rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .client-selector select {
+            max-width: 300px;
+        }
+
         .editor-tabs {
             display: flex;
             gap: 10px;
@@ -197,7 +316,6 @@
             background: rgba(0,0,0,0.05);
         }
 
-        /* Tab Content */
         .tab-content {
             display: none;
             animation: fadeIn 0.3s ease;
@@ -212,7 +330,6 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
-        /* Workout Logging Section */
         .workout-card {
             background: var(--card-bg);
             border-radius: 12px;
@@ -241,6 +358,7 @@
             align-items: center;
             justify-content: center;
             font-weight: bold;
+            font-size: 1.2rem;
         }
 
         .exercise-list {
@@ -256,12 +374,15 @@
             border-radius: 8px;
             margin-bottom: 10px;
             border-left: 4px solid var(--primary-color);
+            flex-wrap: wrap;
+            gap: 15px;
         }
 
         .exercise-inputs {
             display: flex;
             gap: 15px;
             align-items: center;
+            flex-wrap: wrap;
         }
 
         .input-group-small {
@@ -284,7 +405,6 @@
             color: var(--text-color);
         }
 
-        /* Meal Logging Section */
         .meal-log-form {
             background: var(--card-bg);
             border-radius: 12px;
@@ -302,13 +422,13 @@
             padding: 15px;
             background: var(--light-bg);
             border-radius: 8px;
+            flex-wrap: wrap;
         }
 
         .food-details {
             flex: 1;
         }
 
-        /* Comments Section */
         .comment-card {
             background: var(--card-bg);
             border-radius: 12px;
@@ -331,9 +451,10 @@
             font-size: 0.9rem;
             color: var(--text-light);
             margin-bottom: 10px;
+            flex-wrap: wrap;
+            gap: 10px;
         }
 
-        /* Progress Photos Section */
         .photo-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -362,7 +483,6 @@
             padding: 15px;
         }
 
-        /* Buttons */
         .btn-primary {
             background: linear-gradient(45deg, var(--primary-color), var(--secondary-color));
             border: none;
@@ -371,11 +491,15 @@
             color: white;
             font-weight: 500;
             transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .btn-primary:hover {
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            color: white;
         }
 
         .btn-secondary {
@@ -385,9 +509,11 @@
             border-radius: 8px;
             color: var(--text-color);
             transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
         }
 
-        /* Form Controls */
         .form-control, .form-select, textarea {
             background-color: var(--light-bg);
             border: 2px solid #e0e0e0;
@@ -409,7 +535,6 @@
             box-shadow: 0 0 0 0.25rem rgba(74, 111, 165, 0.25);
         }
 
-        /* Theme Toggle */
         .theme-toggle {
             position: fixed;
             bottom: 20px;
@@ -424,7 +549,6 @@
             box-shadow: 0 4px 15px rgba(0,0,0,0.2);
         }
 
-        /* Badges */
         .badge {
             padding: 5px 12px;
             border-radius: 20px;
@@ -447,7 +571,6 @@
             color: var(--info-color);
         }
 
-        /* Responsive */
         @media (max-width: 768px) {
             .stats-grid {
                 grid-template-columns: 1fr;
@@ -455,7 +578,6 @@
             
             .nav-container {
                 flex-direction: column;
-                gap: 15px;
                 text-align: center;
             }
             
@@ -467,7 +589,6 @@
             
             .exercise-item {
                 flex-direction: column;
-                gap: 15px;
                 align-items: flex-start;
             }
             
@@ -475,6 +596,35 @@
                 width: 100%;
                 justify-content: space-between;
             }
+            
+            .client-selector {
+                flex-direction: column;
+            }
+            
+            .client-selector select {
+                width: 100%;
+                max-width: 100%;
+            }
+        }
+
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .user-details {
+            line-height: 1.2;
+        }
+
+        .user-name {
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .user-role {
+            font-size: 0.85rem;
+            color: var(--text-light);
         }
     </style>
 </head>
@@ -483,26 +633,26 @@
     <nav class="editor-nav">
         <div class="nav-container">
             <div class="editor-info">
-                <div class="editor-avatar">ES</div>
+                <div class="editor-avatar"><?php echo strtoupper(substr($_SESSION['user_name'], 0, 2)); ?></div>
                 <div class="editor-details">
-                    <h4>Editor Smith</h4>
-                    <small>Assistant to Coach Sarah Chen</small>
+                    <h4><?php echo htmlspecialchars($_SESSION['user_name']); ?></h4>
+                    <small>Assistant Editor</small>
                 </div>
             </div>
             
             <div class="nav-actions">
-                <button class="btn btn-secondary" onclick="window.location.href='index.php'">
+                <button class="btn btn-secondary" onclick="window.location.href='/appF/index.php'">
                     <i class="bi bi-house-door me-1"></i> Home
                 </button>
                 <div class="dropdown">
                     <button class="btn btn-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
                         <i class="bi bi-person-circle me-1"></i> Profile
                     </button>
-                    <ul class="dropdown-menu">
+                    <ul class="dropdown-menu dropdown-menu-end">
                         <li><a class="dropdown-item" href="#"><i class="bi bi-gear me-2"></i> Settings</a></li>
                         <li><a class="dropdown-item" href="#"><i class="bi bi-bell me-2"></i> Notifications</a></li>
                         <li><hr class="dropdown-divider"></li>
-                        <li><a class="dropdown-item" href="login.php"><i class="bi bi-box-arrow-right me-2"></i> Logout</a></li>
+                        <li><a class="dropdown-item" href="/appF/logout.php"><i class="bi bi-box-arrow-right me-2"></i> Logout</a></li>
                     </ul>
                 </div>
             </div>
@@ -525,7 +675,7 @@
                         <i class="bi bi-people"></i>
                     </div>
                     <div>
-                        <div class="stat-number">12</div>
+                        <div class="stat-number"><?php echo $totalClients; ?></div>
                         <div class="stat-label">Assigned Clients</div>
                     </div>
                 </div>
@@ -538,7 +688,7 @@
                         <i class="bi bi-check-circle"></i>
                     </div>
                     <div>
-                        <div class="stat-number">47</div>
+                        <div class="stat-number"><?php echo $workoutsCount; ?></div>
                         <div class="stat-label">Workouts Logged</div>
                     </div>
                 </div>
@@ -551,7 +701,7 @@
                         <i class="bi bi-egg-fried"></i>
                     </div>
                     <div>
-                        <div class="stat-number">68</div>
+                        <div class="stat-number"><?php echo $mealsCount; ?></div>
                         <div class="stat-label">Meals Tracked</div>
                     </div>
                 </div>
@@ -564,12 +714,31 @@
                         <i class="bi bi-chat-dots"></i>
                     </div>
                     <div>
-                        <div class="stat-number">23</div>
+                        <div class="stat-number"><?php echo $commentsCount; ?></div>
                         <div class="stat-label">Comments Added</div>
                     </div>
                 </div>
                 <small class="text-muted">Progress feedback</small>
             </div>
+        </div>
+
+        <!-- Client Selector -->
+        <div class="client-selector">
+            <div>
+                <i class="bi bi-person-badge me-2"></i>
+                <strong>Working with client:</strong>
+            </div>
+            <select id="clientSelect" class="form-select" onchange="window.location.href='?client=' + this.value">
+                <?php foreach ($clients as $client): ?>
+                <option value="<?php echo $client['id']; ?>" <?php echo $currentClientId == $client['id'] ? 'selected' : ''; ?>>
+                    <?php echo htmlspecialchars($client['name']); ?> 
+                    (<?php echo $client['workouts_completed']; ?> workouts)
+                </option>
+                <?php endforeach; ?>
+                <?php if (empty($clients)): ?>
+                <option value="">No clients assigned yet</option>
+                <?php endif; ?>
+            </select>
         </div>
 
         <!-- Tabs Navigation -->
@@ -595,92 +764,91 @@
         <div id="workouts" class="tab-content active">
             <h3 class="mb-4">Log Client Workouts</h3>
             
-            <div class="workout-card">
-                <div class="client-info">
-                    <div class="client-avatar">MW</div>
-                    <div>
-                        <h5 class="mb-1">Michael Wong</h5>
-                        <p class="mb-0 text-muted">Today's Workout: Push Day • Status: <span class="badge badge-warning">In Progress</span></p>
-                    </div>
-                </div>
-                
-                <div class="exercise-list">
-                    <h6>Exercises to Log:</h6>
-                    <div class="exercise-item">
+            <?php if (!empty($pendingWorkouts)): ?>
+                <?php foreach ($pendingWorkouts as $workout): ?>
+                <div class="workout-card">
+                    <div class="client-info">
+                        <div class="client-avatar"><?php echo strtoupper(substr($workout['client_name'], 0, 2)); ?></div>
                         <div>
-                            <strong>Bench Press</strong>
-                            <p class="mb-0 small text-muted">3 sets × 8 reps @ 70% 1RM</p>
-                        </div>
-                        <div class="exercise-inputs">
-                            <div class="input-group-small">
-                                <label>Weight (lbs)</label>
-                                <input type="number" value="185">
-                            </div>
-                            <div class="input-group-small">
-                                <label>Sets</label>
-                                <input type="number" value="3">
-                            </div>
-                            <div class="input-group-small">
-                                <label>Reps</label>
-                                <input type="number" value="8">
-                            </div>
-                            <button class="btn btn-primary btn-sm">
-                                <i class="bi bi-check"></i> Log
-                            </button>
+                            <h5 class="mb-1"><?php echo htmlspecialchars($workout['client_name']); ?></h5>
+                            <p class="mb-0 text-muted">
+                                Today's Workout: <?php echo htmlspecialchars($workout['workout_name'] ?? 'Custom Workout'); ?> • 
+                                Status: <span class="badge badge-warning"><?php echo ucfirst($workout['status']); ?></span>
+                            </p>
                         </div>
                     </div>
                     
-                    <div class="exercise-item">
-                        <div>
-                            <strong>Incline Dumbbell Press</strong>
-                            <p class="mb-0 small text-muted">3 sets × 10 reps</p>
+                    <div class="exercise-list">
+                        <h6>Exercises to Log:</h6>
+                        <div class="exercise-item">
+                            <div>
+                                <strong>Bench Press</strong>
+                                <p class="mb-0 small text-muted">3 sets × 8 reps @ 70% 1RM</p>
+                            </div>
+                            <div class="exercise-inputs">
+                                <div class="input-group-small">
+                                    <label>Weight (lbs)</label>
+                                    <input type="number" value="185">
+                                </div>
+                                <div class="input-group-small">
+                                    <label>Sets</label>
+                                    <input type="number" value="3">
+                                </div>
+                                <div class="input-group-small">
+                                    <label>Reps</label>
+                                    <input type="number" value="8">
+                                </div>
+                                <button class="btn btn-primary btn-sm">
+                                    <i class="bi bi-check"></i> Log
+                                </button>
+                            </div>
                         </div>
-                        <div class="exercise-inputs">
-                            <div class="input-group-small">
-                                <label>Weight (lbs)</label>
-                                <input type="number" value="65">
+                        
+                        <div class="exercise-item">
+                            <div>
+                                <strong>Incline Dumbbell Press</strong>
+                                <p class="mb-0 small text-muted">3 sets × 10 reps</p>
                             </div>
-                            <div class="input-group-small">
-                                <label>Sets</label>
-                                <input type="number" value="3">
+                            <div class="exercise-inputs">
+                                <div class="input-group-small">
+                                    <label>Weight (lbs)</label>
+                                    <input type="number" value="65">
+                                </div>
+                                <div class="input-group-small">
+                                    <label>Sets</label>
+                                    <input type="number" value="3">
+                                </div>
+                                <div class="input-group-small">
+                                    <label>Reps</label>
+                                    <input type="number" value="10">
+                                </div>
+                                <button class="btn btn-primary btn-sm">
+                                    <i class="bi bi-check"></i> Log
+                                </button>
                             </div>
-                            <div class="input-group-small">
-                                <label>Reps</label>
-                                <input type="number" value="10">
-                            </div>
-                            <button class="btn btn-primary btn-sm">
-                                <i class="bi bi-check"></i> Log
-                            </button>
                         </div>
                     </div>
-                </div>
-                
-                <div class="d-flex justify-content-between">
-                    <button class="btn btn-secondary">
-                        <i class="bi bi-skip-backward me-1"></i> Previous Client
-                    </button>
-                    <button class="btn btn-primary">
-                        <i class="bi bi-check-circle me-1"></i> Complete Workout
-                    </button>
-                    <button class="btn btn-secondary">
-                        Next Client <i class="bi bi-skip-forward ms-1"></i>
-                    </button>
-                </div>
-            </div>
-            
-            <div class="workout-card">
-                <div class="client-info">
-                    <div class="client-avatar">ED</div>
-                    <div>
-                        <h5 class="mb-1">Emma Davis</h5>
-                        <p class="mb-0 text-muted">Today's Workout: Leg Day • Status: <span class="badge badge-success">Completed</span></p>
+                    
+                    <div class="d-flex justify-content-between">
+                        <button class="btn btn-secondary">
+                            <i class="bi bi-skip-backward me-1"></i> Previous Client
+                        </button>
+                        <button class="btn btn-primary">
+                            <i class="bi bi-check-circle me-1"></i> Complete Workout
+                        </button>
+                        <button class="btn btn-secondary">
+                            Next Client <i class="bi bi-skip-forward ms-1"></i>
+                        </button>
                     </div>
                 </div>
-                <p class="text-muted">All exercises logged for today. Ready for coach review.</p>
-                <button class="btn btn-secondary">
-                    <i class="bi bi-eye me-1"></i> View Details
-                </button>
+                <?php endforeach; ?>
+            <?php else: ?>
+            <div class="workout-card text-center">
+                <i class="bi bi-check-circle fs-1 text-success mb-3 d-block"></i>
+                <h5>All caught up!</h5>
+                <p class="text-muted mb-0">No pending workouts for today. Check back later or help with nutrition tracking.</p>
             </div>
+            <?php endif; ?>
         </div>
 
         <!-- Nutrition Tracking Tab -->
@@ -689,18 +857,17 @@
             
             <div class="meal-log-form">
                 <div class="mb-4">
-                    <label for="clientSelect" class="form-label">Select Client</label>
-                    <select class="form-select" id="clientSelect">
-                        <option selected>Michael Wong</option>
-                        <option>Emma Davis</option>
-                        <option>David Wilson</option>
-                        <option>James Miller</option>
+                    <label for="mealClientSelect" class="form-label">Select Client</label>
+                    <select class="form-select" id="mealClientSelect">
+                        <?php foreach ($clients as $client): ?>
+                        <option value="<?php echo $client['id']; ?>"><?php echo htmlspecialchars($client['name']); ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </div>
                 
                 <div class="mb-4">
                     <label class="form-label">Meal Type</label>
-                    <div class="d-flex gap-3">
+                    <div class="d-flex gap-3 flex-wrap">
                         <div class="form-check">
                             <input class="form-check-input" type="radio" name="mealType" id="breakfast" checked>
                             <label class="form-check-label" for="breakfast">Breakfast</label>
@@ -724,11 +891,11 @@
                     <label class="form-label">Food Items</label>
                     <div class="food-item">
                         <div class="food-details">
-                            <div class="d-flex justify-content-between">
+                            <div class="d-flex justify-content-between flex-wrap gap-2">
                                 <strong>Grilled Chicken Breast</strong>
                                 <span class="badge badge-info">Custom Entry</span>
                             </div>
-                            <div class="d-flex justify-content-between">
+                            <div class="d-flex justify-content-between flex-wrap gap-2">
                                 <span>Protein: 31g • Carbs: 0g • Fat: 3.6g</span>
                                 <span>200g serving</span>
                             </div>
@@ -740,11 +907,11 @@
                     
                     <div class="food-item">
                         <div class="food-details">
-                            <div class="d-flex justify-content-between">
+                            <div class="d-flex justify-content-between flex-wrap gap-2">
                                 <strong>Brown Rice</strong>
                                 <span class="badge badge-success">Database</span>
                             </div>
-                            <div class="d-flex justify-content-between">
+                            <div class="d-flex justify-content-between flex-wrap gap-2">
                                 <span>Protein: 5g • Carbs: 45g • Fat: 2g</span>
                                 <span>150g cooked</span>
                             </div>
@@ -760,19 +927,19 @@
                 </div>
                 
                 <div class="row mb-4">
-                    <div class="col-md-3">
+                    <div class="col-md-3 col-6">
                         <label class="form-label">Total Calories</label>
                         <input type="text" class="form-control" value="485" readonly>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-3 col-6">
                         <label class="form-label">Protein (g)</label>
                         <input type="text" class="form-control" value="36" readonly>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-3 col-6">
                         <label class="form-label">Carbs (g)</label>
                         <input type="text" class="form-control" value="45" readonly>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-3 col-6">
                         <label class="form-label">Fat (g)</label>
                         <input type="text" class="form-control" value="5.6" readonly>
                     </div>
@@ -792,10 +959,9 @@
                 <div class="mb-4">
                     <label for="commentClient" class="form-label">Select Client</label>
                     <select class="form-select" id="commentClient">
-                        <option selected>Michael Wong</option>
-                        <option>Emma Davis</option>
-                        <option>David Wilson</option>
-                        <option>James Miller</option>
+                        <?php foreach ($clients as $client): ?>
+                        <option value="<?php echo $client['id']; ?>"><?php echo htmlspecialchars($client['name']); ?></option>
+                        <?php endforeach; ?>
                     </select>
                 </div>
                 
@@ -815,7 +981,7 @@
                     <textarea class="form-control" id="commentText" rows="5" placeholder="Add your feedback for the client..."></textarea>
                 </div>
                 
-                <div class="d-flex justify-content-between">
+                <div class="d-flex justify-content-between flex-wrap gap-2">
                     <button class="btn btn-secondary">
                         <i class="bi bi-paperclip me-1"></i> Attach Photo
                     </button>
@@ -826,21 +992,21 @@
             </div>
             
             <h4 class="mb-3">Recent Comments</h4>
+            <?php foreach ($recentComments as $comment): ?>
             <div class="comment-box">
                 <div class="comment-meta">
-                    <span><strong>Emma Davis</strong> • Workout Performance</span>
-                    <span>2 hours ago</span>
+                    <span>
+                        <strong><?php echo htmlspecialchars($comment['user_name'] ?? 'Client'); ?></strong> 
+                        • <?php echo htmlspecialchars($comment['details'] ?? 'General feedback'); ?>
+                    </span>
+                    <span><?php echo formatDate($comment['created_at']); ?></span>
                 </div>
-                <p class="mb-0">Great improvement on squats today! Form was much better and you added 10lbs to your working sets. Keep it up!</p>
+                <p class="mb-0"><?php echo htmlspecialchars($comment['details'] ?? 'Great progress!'); ?></p>
             </div>
-            
-            <div class="comment-box">
-                <div class="comment-meta">
-                    <span><strong>Michael Wong</strong> • Nutrition Adherence</span>
-                    <span>Yesterday</span>
-                </div>
-                <p class="mb-0">Noticed you're hitting your protein targets consistently this week. The meal prep is paying off!</p>
-            </div>
+            <?php endforeach; ?>
+            <?php if (empty($recentComments)): ?>
+            <p class="text-center text-muted">No comments yet. Add your first comment above!</p>
+            <?php endif; ?>
         </div>
 
         <!-- Progress Photos Tab -->
@@ -848,11 +1014,11 @@
             <h3 class="mb-4">Manage Progress Photos</h3>
             
             <div class="mb-4">
-                <div class="d-flex justify-content-between align-items-center">
+                <div class="d-flex justify-content-between align-items-center flex-wrap gap-3">
                     <div>
-                        <label for="photoClient" class="form-label">Client: Michael Wong</label>
+                        <label class="form-label mb-0">Client: <strong>Current Selection</strong></label>
                     </div>
-                    <button class="btn btn-primary">
+                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#uploadPhotoModal">
                         <i class="bi bi-cloud-upload me-1"></i> Upload New Photos
                     </button>
                 </div>
@@ -865,7 +1031,7 @@
                     </div>
                     <div class="photo-info">
                         <h6 class="mb-1">Front View</h6>
-                        <p class="mb-0 small text-muted">Jan 15, 2024</p>
+                        <p class="mb-0 small text-muted"><?php echo date('M d, Y'); ?></p>
                         <button class="btn btn-sm btn-outline-primary mt-2 w-100">
                             <i class="bi bi-chat me-1"></i> Add Comment
                         </button>
@@ -878,7 +1044,7 @@
                     </div>
                     <div class="photo-info">
                         <h6 class="mb-1">Side View</h6>
-                        <p class="mb-0 small text-muted">Jan 15, 2024</p>
+                        <p class="mb-0 small text-muted"><?php echo date('M d, Y', strtotime('-1 week')); ?></p>
                         <button class="btn btn-sm btn-outline-primary mt-2 w-100">
                             <i class="bi bi-chat me-1"></i> Add Comment
                         </button>
@@ -891,7 +1057,7 @@
                     </div>
                     <div class="photo-info">
                         <h6 class="mb-1">Back View</h6>
-                        <p class="mb-0 small text-muted">Jan 15, 2024</p>
+                        <p class="mb-0 small text-muted"><?php echo date('M d, Y', strtotime('-2 weeks')); ?></p>
                         <button class="btn btn-sm btn-outline-primary mt-2 w-100">
                             <i class="bi bi-chat me-1"></i> Add Comment
                         </button>
@@ -899,11 +1065,11 @@
                 </div>
             </div>
             
-            <div class="d-flex justify-content-between mt-4">
+            <div class="d-flex justify-content-between mt-4 flex-wrap gap-2">
                 <button class="btn btn-secondary">
                     <i class="bi bi-arrow-left me-1"></i> Previous Week
                 </button>
-                <span class="text-muted">Week of Jan 15-21, 2024</span>
+                <span class="text-muted">Week of <?php echo date('M d, Y'); ?></span>
                 <button class="btn btn-secondary">
                     Next Week <i class="bi bi-arrow-right ms-1"></i>
                 </button>
@@ -926,74 +1092,84 @@
                         </tr>
                     </thead>
                     <tbody>
+                        <?php foreach ($clients as $client): ?>
                         <tr>
                             <td>
                                 <div class="d-flex align-items-center">
-                                    <div class="client-avatar me-2" style="width: 35px; height: 35px; font-size: 0.9rem;">MW</div>
+                                    <div class="client-avatar me-2" style="width: 35px; height: 35px; font-size: 0.9rem;">
+                                        <?php echo strtoupper(substr($client['name'], 0, 2)); ?>
+                                    </div>
                                     <div>
-                                        <strong>Michael Wong</strong>
-                                        <div class="small text-muted">Weight Loss Program</div>
+                                        <strong><?php echo htmlspecialchars($client['name']); ?></strong>
+                                        <div class="small text-muted"><?php echo $client['workouts_completed']; ?> workouts completed</div>
                                     </div>
                                 </div>
                             </td>
-                            <td>Today, 10:30 AM</td>
-                            <td>2 hours ago</td>
+                            <td><?php echo $client['last_workout'] ? formatDate($client['last_workout']) : 'Never'; ?></td>
+                            <td><?php echo $client['meals_today'] ?? 0; ?> today</td>
                             <td><span class="badge badge-success">Active</span></td>
                             <td>
-                                <button class="btn btn-sm btn-outline-primary">
+                                <button class="btn btn-sm btn-outline-primary" onclick="window.location.href='?client=<?php echo $client['id']; ?>#workouts'">
                                     <i class="bi bi-activity"></i>
                                 </button>
-                                <button class="btn btn-sm btn-outline-success">
+                                <button class="btn btn-sm btn-outline-success" onclick="window.location.href='?client=<?php echo $client['id']; ?>#nutrition'">
                                     <i class="bi bi-egg-fried"></i>
                                 </button>
                             </td>
                         </tr>
+                        <?php endforeach; ?>
+                        <?php if (empty($clients)): ?>
                         <tr>
-                            <td>
-                                <div class="d-flex align-items-center">
-                                    <div class="client-avatar me-2" style="width: 35px; height: 35px; font-size: 0.9rem;">ED</div>
-                                    <div>
-                                        <strong>Emma Davis</strong>
-                                        <div class="small text-muted">Muscle Gain Program</div>
-                                    </div>
-                                </div>
-                            </td>
-                            <td>Yesterday</td>
-                            <td>Today, 1:00 PM</td>
-                            <td><span class="badge badge-success">Active</span></td>
-                            <td>
-                                <button class="btn btn-sm btn-outline-primary">
-                                    <i class="bi bi-activity"></i>
-                                </button>
-                                <button class="btn btn-sm btn-outline-success">
-                                    <i class="bi bi-egg-fried"></i>
-                                </button>
-                            </td>
+                            <td colspan="5" class="text-center text-muted">No clients assigned yet.</td>
                         </tr>
-                        <tr>
-                            <td>
-                                <div class="d-flex align-items-center">
-                                    <div class="client-avatar me-2" style="width: 35px; height: 35px; font-size: 0.9rem;">DW</div>
-                                    <div>
-                                        <strong>David Wilson</strong>
-                                        <div class="small text-muted">Sports Performance</div>
-                                    </div>
-                                </div>
-                            </td>
-                            <td>2 days ago</td>
-                            <td>Yesterday</td>
-                            <td><span class="badge badge-warning">Behind Schedule</span></td>
-                            <td>
-                                <button class="btn btn-sm btn-outline-primary">
-                                    <i class="bi bi-activity"></i>
-                                </button>
-                                <button class="btn btn-sm btn-outline-warning">
-                                    <i class="bi bi-bell"></i>
-                                </button>
-                            </td>
-                        </tr>
+                        <?php endif; ?>
                     </tbody>
                 </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Photo Modal -->
+    <div class="modal fade" id="uploadPhotoModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Upload Progress Photo</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form action="/appF/api/upload-photo.php" method="POST" enctype="multipart/form-data">
+                    <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label class="form-label">Select Client</label>
+                            <select name="client_id" class="form-select" required>
+                                <?php foreach ($clients as $client): ?>
+                                <option value="<?php echo $client['id']; ?>"><?php echo htmlspecialchars($client['name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Photo</label>
+                            <input type="file" name="photo" class="form-control" accept="image/*" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Body Part</label>
+                            <select name="body_part" class="form-select">
+                                <option value="front">Front View</option>
+                                <option value="side">Side View</option>
+                                <option value="back">Back View</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Comments (Optional)</label>
+                            <textarea name="comments" class="form-control" rows="3" placeholder="Add notes about the progress..."></textarea>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Upload</button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
@@ -1039,11 +1215,9 @@
             button.addEventListener('click', () => {
                 const tabId = button.getAttribute('data-tab');
                 
-                // Update active tab button
                 tabButtons.forEach(btn => btn.classList.remove('active'));
                 button.classList.add('active');
                 
-                // Show selected tab content
                 tabContents.forEach(content => {
                     content.classList.remove('active');
                     if (content.id === tabId) {
@@ -1053,26 +1227,33 @@
             });
         });
 
+        // Handle URL hash for tab navigation
+        if (window.location.hash) {
+            const hash = window.location.hash.substring(1);
+            const targetTab = document.querySelector(`.tab-btn[data-tab="${hash}"]`);
+            if (targetTab) {
+                targetTab.click();
+            }
+        }
+
         // Simulate workout logging
         const logButtons = document.querySelectorAll('.exercise-inputs .btn');
         logButtons.forEach(button => {
             button.addEventListener('click', function() {
                 const exerciseItem = this.closest('.exercise-item');
                 const exerciseName = exerciseItem.querySelector('strong').textContent;
+                const clientName = this.closest('.workout-card')?.querySelector('.client-info h5')?.textContent || 'client';
                 
-                // Simulate logging
                 this.innerHTML = '<i class="bi bi-check-circle"></i> Logged';
                 this.classList.remove('btn-primary');
                 this.classList.add('btn-success');
                 this.disabled = true;
                 
-                // Show notification
-                showNotification(`Logged ${exerciseName} for Michael Wong`);
+                showNotification(`Logged ${exerciseName} for ${clientName}`);
             });
         });
 
         function showNotification(message) {
-            // Create notification element
             const notification = document.createElement('div');
             notification.className = 'alert alert-success position-fixed';
             notification.style.cssText = `
@@ -1090,7 +1271,6 @@
             
             document.body.appendChild(notification);
             
-            // Auto remove after 3 seconds
             setTimeout(() => {
                 if (notification.parentElement) {
                     notification.remove();
@@ -1098,7 +1278,6 @@
             }, 3000);
         }
 
-        // Add animation style
         const style = document.createElement('style');
         style.textContent = `
             @keyframes slideIn {

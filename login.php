@@ -1,3 +1,53 @@
+<?php
+// File: C:\xampp\htdocs\appF\login.php
+
+// Include backend files
+require_once 'includes/config.php';
+require_once 'includes/functions.php';
+require_once 'includes/auth.php';
+require_once 'includes/middleware.php';
+
+// Redirect if already logged in
+if (isLoggedIn()) {
+    redirect('/appF/dashboard/' . $_SESSION['user_role'] . '.php');
+}
+
+// Handle login form submission
+$error = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $email = sanitize($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $remember = isset($_POST['remember']);
+    
+    if (empty($email) || empty($password)) {
+        $error = 'Please enter both email and password';
+    } else {
+        $result = loginUser($email, $password, $remember);
+        
+        if ($result['success']) {
+            // Redirect based on role
+            switch ($result['role']) {
+                case 'admin':
+                    redirect('/appF/dashboard/admin.php');
+                    break;
+                case 'coach':
+                    redirect('/appF/dashboard/coach.php');
+                    break;
+                case 'editor':
+                    redirect('/appF/dashboard/editor.php');
+                    break;
+                case 'client':
+                    redirect('/appF/dashboard/client.php');
+                    break;
+                default:
+                    redirect('/appF/index.php');
+            }
+        } else {
+            $error = $result['error'];
+        }
+    }
+}
+?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="light">
 <head>
@@ -109,6 +159,7 @@
             border-radius: 10px;
             transition: all 0.3s;
             width: 100%;
+            color: white;
         }
 
         .login-btn:hover {
@@ -265,7 +316,11 @@
             color: var(--error-color);
             font-size: 0.875rem;
             margin-top: 5px;
-            display: none;
+        }
+
+        .alert {
+            border-radius: 10px;
+            margin-bottom: 1.5rem;
         }
 
         @media (max-width: 576px) {
@@ -306,7 +361,7 @@
 </head>
 <body>
     <!-- Back to Home Link -->
-    <a href="index.php" class="back-to-home">
+    <a href="/appF/index.php" class="back-to-home">
         <i class="bi bi-arrow-left"></i> Back to Home
     </a>
 
@@ -323,24 +378,32 @@
             <div class="login-body">
                 <!-- Action Buttons -->
                 <div class="action-buttons">
-                    <a href="index.php" class="action-btn">
+                    <a href="/appF/index.php" class="action-btn">
                         <i class="bi bi-house-door me-1"></i> Home
                     </a>
-                    <a href="signup.php" class="action-btn">
+                    <a href="/appF/signup.php" class="action-btn">
                         <i class="bi bi-person-plus me-1"></i> Sign Up
                     </a>
                 </div>
 
+                <!-- Error Message -->
+                <?php if ($error): ?>
+                    <div class="alert alert-danger"><?php echo $error; ?></div>
+                <?php endif; ?>
+
                 <!-- Login Form -->
-                <form id="loginForm" action="#" method="POST">
-                    <!-- Username Field -->
+                <form id="loginForm" action="login.php" method="POST">
+                    <input type="hidden" name="csrf_token" value="<?php echo generateCSRFToken(); ?>">
+                    
+                    <!-- Email Field -->
                     <div class="input-group">
-                        <i class="bi bi-person input-icon"></i>
-                        <input type="text" 
+                        <i class="bi bi-envelope input-icon"></i>
+                        <input type="email" 
                                class="form-control" 
-                               id="username" 
-                               name="username"
-                               placeholder="Enter your username or email"
+                               id="email" 
+                               name="email"
+                               placeholder="Enter your email"
+                               value="<?php echo htmlspecialchars($_POST['email'] ?? ''); ?>"
                                required>
                     </div>
 
@@ -357,17 +420,16 @@
                             <i class="bi bi-eye"></i>
                         </button>
                     </div>
-                    <div id="passwordError" class="error-message"></div>
 
                     <!-- Remember Me & Forgot Password -->
                     <div class="d-flex justify-content-between align-items-center mb-4">
                         <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="rememberMe">
-                            <label class="form-check-label" for="rememberMe">
+                            <input class="form-check-input" type="checkbox" id="remember" name="remember">
+                            <label class="form-check-label" for="remember">
                                 Remember me
                             </label>
                         </div>
-                        <a href="forgot-password.php" class="forgot-password">
+                        <a href="/appF/forgot-password.php" class="forgot-password">
                             <i class="bi bi-question-circle me-1"></i> Forgot password?
                         </a>
                     </div>
@@ -378,6 +440,17 @@
                     </button>
                 </form>
 
+                <!-- Demo Login Info -->
+                <div class="alert alert-info">
+                    <small>
+                        <strong>Demo Credentials:</strong><br>
+                        Admin: admin@fitcoach.com / Admin@123<br>
+                        Coach: sarah@fitcoach.com / Admin@123<br>
+                        Client: michael@example.com / Admin@123<br>
+                        Editor: editor@fitcoach.com / Admin@123
+                    </small>
+                </div>
+
                 <!-- Divider -->
                 <div class="divider">
                     <span>Or continue with</span>
@@ -385,17 +458,17 @@
 
                 <!-- Social Login -->
                 <div class="social-login">
-                    <button type="button" class="social-btn">
+                    <button type="button" class="social-btn" onclick="alert('Google login coming soon!')">
                         <i class="bi bi-google" style="color: #DB4437;"></i> Google
                     </button>
-                    <button type="button" class="social-btn">
+                    <button type="button" class="social-btn" onclick="alert('Facebook login coming soon!')">
                         <i class="bi bi-facebook" style="color: #4267B2;"></i> Facebook
                     </button>
                 </div>
 
                 <!-- Sign Up Link -->
                 <div class="signup-link">
-                    Don't have an account? <a href="signup.php">Sign up here</a>
+                    Don't have an account? <a href="/appF/signup.php">Apply for membership</a>
                 </div>
             </div>
         </div>
@@ -415,11 +488,9 @@
         const themeIcon = document.getElementById('themeIcon');
         const htmlElement = document.documentElement;
         
-        // Check for saved theme or prefer-color-scheme
         const savedTheme = localStorage.getItem('theme') || 
                           (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
         
-        // Apply saved theme
         htmlElement.setAttribute('data-bs-theme', savedTheme);
         updateThemeIcon(savedTheme);
         
@@ -449,82 +520,19 @@
 
         // Form validation
         const loginForm = document.getElementById('loginForm');
-        const passwordError = document.getElementById('passwordError');
         
         loginForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            
-            // Get form values
-            const username = document.getElementById('username').value.trim();
+            const email = document.getElementById('email').value.trim();
             const password = document.getElementById('password').value.trim();
             
-            // Simple validation
-            let isValid = true;
-            
-            if (!username) {
-                showError(document.getElementById('username'), 'Please enter your username or email');
-                isValid = false;
-            } else {
-                clearError(document.getElementById('username'));
-            }
-            
-            if (!password) {
-                showError(passwordInput, 'Please enter your password');
-                passwordError.textContent = 'Please enter your password';
-                passwordError.style.display = 'block';
-                isValid = false;
-            } else if (password.length < 6) {
-                passwordError.textContent = 'Password must be at least 6 characters';
-                passwordError.style.display = 'block';
-                isValid = false;
-            } else {
-                clearError(passwordInput);
-                passwordError.style.display = 'none';
-            }
-            
-            if (isValid) {
-                // Here you would normally send the data to the server
-                console.log('Login attempt:', { username, password });
-                
-                // Show loading state
-                const submitBtn = loginForm.querySelector('button[type="submit"]');
-                const originalText = submitBtn.innerHTML;
-                submitBtn.innerHTML = '<i class="bi bi-arrow-repeat me-2"></i> Signing in...';
-                submitBtn.disabled = true;
-                
-                // Simulate API call
-                setTimeout(() => {
-                    submitBtn.innerHTML = originalText;
-                    submitBtn.disabled = false;
-                    
-                    // For demo purposes - show success message
-                    alert('Login successful! (This is a demo. In a real app, this would redirect to dashboard)');
-                    
-                    // In real app, you would redirect:
-                    // window.location.href = 'dashboard.php';
-                }, 1500);
+            if (!email || !password) {
+                e.preventDefault();
+                alert('Please enter both email and password');
             }
         });
 
-        function showError(input, message) {
-            input.style.borderColor = 'var(--error-color)';
-            input.style.boxShadow = '0 0 0 0.25rem rgba(220, 53, 69, 0.25)';
-        }
-
-        function clearError(input) {
-            input.style.borderColor = '';
-            input.style.boxShadow = '';
-        }
-
-        // Auto-focus on username field
-        document.getElementById('username').focus();
-
-        // Enter key to submit form
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && document.activeElement !== document.getElementById('password')) {
-                document.getElementById('loginForm').requestSubmit();
-            }
-        });
+        // Auto-focus on email field
+        document.getElementById('email').focus();
     </script>
 </body>
 </html>

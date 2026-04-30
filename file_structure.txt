@@ -1,0 +1,44 @@
+C:\xampp\htdocs\appF\
+├── index.php                    # Keep as is (public homepage)
+├── login.php                    # Keep as is (login form)
+├── signup.php                   # Keep as is (membership form)
+├── forgot-password.php          # Keep as is
+│
+├── /dashboard/                   # Move all dashboards here
+│   ├── admin.php                 # (renamed from admin-dashboard.php)
+│   ├── coach.php                 # (renamed from coachdashboard.php)
+│   ├── client.php                # (renamed from clientdashboard.php)
+│   └── editor.php                # (renamed from editorpanel.php)
+│
+├── /includes/                    # NEW - Backend logic
+│   ├── config.php                # Database connection
+│   ├── auth.php                  # Login/logout functions
+│   ├── session.php               # Session management
+│   ├── roles.php                 # Role-based access control
+│   ├── functions.php             # Helper functions
+│   ├── validation.php            # Input validation
+│   └── db/                       # Database queries
+│       ├── users.php
+│       ├── workouts.php
+│       ├── nutrition.php
+│       └── payments.php
+│
+├── /api/                         # NEW - AJAX endpoints
+│   ├── auth.php                  # Login API
+│   ├── workouts.php              # Workout logging
+│   ├── nutrition.php             # Meal logging  
+│   ├── progress.php              # Photo uploads
+│   └── notifications.php         # Real-time updates
+│
+├── /uploads/                      # NEW - User content
+│   ├── /progress-photos/
+│   └── /profile-pics/
+│
+├── /assets/                       # Keep organized
+│   ├── /css/
+│   ├── /js/
+│   └── /images/
+│
+├── /vendor/                       # Optional (Composer packages)
+│
+└── .htaccess                      # URL rewriting, security
